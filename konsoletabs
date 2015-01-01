@@ -1,0 +1,288 @@
+#!/usr/bin/env python
+
+'''
+Konsole Tabs
+'''
+
+__author__    = "Eric Subach"
+__copyright__ = "Copyright 2015, Eric Subach"
+__license__   = "Apache License, Version 2.0"
+__version__   = "0.1"
+
+import argparse
+import errno
+import os
+import os.path
+import json
+import logging
+import sets
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+class KonsoleTabsError(Exception):
+   pass
+
+
+class BashAttributes(object):
+   def __init__(self):
+      self.env_command_template = 'export {}="{}"'
+
+
+class CshAttributes(object):
+   def __init__(self):
+      self.env_command_template = 'setenv {} {}'
+
+
+class PidSetCalculator(object):
+   '''
+   Calculate a set of process IDs for a given program name.
+
+   Requires the "pidof" program.
+   '''
+   def __init__(self, program_name):
+      self.program_name = program_name
+      self.pids = sets.Set()
+
+   def calculate(self):
+      try:
+         process = subprocess.Popen(['pidof', self.program_name], stdout=subprocess.PIPE)
+         process.wait()
+         set_string = process.communicate()[0].strip()
+         self.pids = sets.Set(set_string.split())
+      except Exception:
+         raise KonsoleTabsError('Error: Could not find the "pidof" program.')
+
+
+class KonsoleDbus(object):
+   '''
+   Manipulates a Konsole window through dbus.
+   '''
+   def __init__(self, pid):
+      self.session_num = None
+      self.pid = pid
+
+      # FIXME make it easier to fomat the templates      
+      self.command_base              = 'qdbus org.kde.konsole-{pid}'.format(pid=pid)
+      self.create_session_template   = '{command_base} /Konsole newSession'
+      self.set_tab_title_template    = '{command_base} /Sessions/{session_num} setTitle 1 {name}'
+      self.send_command_template     = '{command_base} /Sessions/{session_num} sendText "{command}\n"'
+      self.enter_command_template    = '{command_base} /Sessions/{session_num} sendText $\'\n\''
+      self.activate_session_template = '{command_base} /Konsole prevSession'
+   
+   def create_session(self):
+      command_string = self.create_session_template.format(command_base=self.command_base)
+      logging.getLogger().info('Creating DBUS session...')
+      try:
+         process = subprocess.Popen(shlex.split(command_string), stdout=subprocess.PIPE)
+         output, error = process.communicate()
+      except Exception:
+         raise KonsoleTabsError('Error: Error executing dbus command.')
+      else:
+         self.session_num = output.strip()
+         logging.getLogger().info('Created DBUS session #{}'.format(self.session_num))
+         if error:
+            raise KonsoleTabsError('Error: Error executing dbus command.')
+      
+   def add_tab(self, name):
+      command_string = self.set_tab_title_template.format(command_base=self.command_base, session_num=self.session_num, name=name)
+      logging.getLogger().info('Adding tab: {}'.format(name))
+      try:
+         process = subprocess.Popen(shlex.split(command_string), stdout=subprocess.PIPE)
+         output, error = process.communicate()
+      except Exception:
+         raise KonsoleTabsError('Error: Error executing dbus command.')
+      else:
+         if error:
+            raise KonsoleTabsError('Error: Error executing dbus command.')
+   
+   def send_command(self, command):
+      logging.getLogger().info('Sending command: {}'.format(command))
+      command_string = self.send_command_template.format(command_base=self.command_base, session_num=self.session_num, command=command)
+      try:
+         process = subprocess.Popen(shlex.split(command_string), stdout=subprocess.PIPE)
+         output, error = process.communicate()
+      except Exception:
+         raise KonsoleTabsError('Error: Error executing dbus command.')
+      else:
+         if error:
+            raise KonsoleTabsError('Error: Error executing dbus command.')
+
+
+class KonsoleTabs(object):
+   '''
+   Creates a console window with predefined tabs and other options.
+
+   Valid shell options are "bash" and "csh".
+   '''
+   def __init__(self, config_filepath):
+      if not config_filepath:
+         self.config_filepath = os.path.join(os.path.expanduser('~'), '.konsole_tabs')
+      else:
+         self.config_filepath = os.path.expanduser(config_filepath)
+
+      self.sleep_secs = 0.1
+      self.new_process_command_template = 'konsole --separate'
+      self.program_name = 'konsole'
+      
+   def _load_config_as_json(self):
+      try:
+         with open(self.config_filepath) as file:
+            try:
+               data = json.load(file)
+            except Exception:
+               raise KonsoleTabsError('Error: Configuration file "{}" has formatting issues.'.format(self.config_filepath))
+         return data
+      except IOError as e:
+         if e[0] == errno.ENOENT:
+            raise KonsoleTabsError('Error: Configuration file "{}" does not exist.'.format(self.config_filepath))
+         else:
+            raise KonsoleTabsError('Error: Some error occurred when trying to read "{}".'.format(self.config_filepath))
+      
+   def _set_history_contents(self, file_path, commands):
+      contents = os.linesep.join(commands) + os.linesep
+      
+      logging.getLogger().info('Writing history file contents...')
+      try:
+         with open(file_path, 'wb') as file:
+            file.write(contents)
+      except IOError:
+         raise KonsoleTabsError('Error: Some error occurred when writing to history file.')
+      
+   def _load_profile(self, profile_name):
+      data = self._load_config_as_json()
+
+      try:
+         return next(iter([profile for profile in data if profile['profile'] == profile_name]))
+      except StopIteration:
+         raise KonsoleTabsError('Error: Profile "{}" not found.'.format(profile_name))
+
+   def _execute_commands(self, profile):
+      shell_attributes = self._get_shell_attributes(profile['shell'])
+
+      pids_before = PidSetCalculator(self.program_name)
+      pids_before.calculate()
+
+      # Create new process.
+      logging.getLogger().info('Creating new Konsole process.')
+      try:
+         FNULL = open(os.devnull, 'w')
+         process = subprocess.Popen(shlex.split(self.new_process_command_template), stdout=FNULL, stderr=subprocess.STDOUT)
+         process.communicate()
+      except Exception:
+         raise KonsoleTabsError('Error: Error creating new Konsole process.')
+
+      # Get PID of new process.
+      pids_after = PidSetCalculator(self.program_name)
+      pids_after.calculate()
+      difference = pids_after.pids - pids_before.pids
+      if len(difference) == 1:
+         pid = difference.pop()
+      else:
+         raise KonsoleTabsError('Error: Couldn\'t get PID of new Konsole process.')
+
+      for tab in profile['tabs']:
+         # Set the history.
+         self._set_history_contents(os.path.expanduser(profile['history']), tab['history'])
+         time.sleep(self.sleep_secs)
+
+         # Add tab.
+         dbus = KonsoleDbus(pid)
+         dbus.create_session()
+         time.sleep(self.sleep_secs)
+         
+         # Set tab name.
+         dbus.add_tab(tab['name'])
+         time.sleep(self.sleep_secs)
+         
+         # Send common commands.
+         if 'common_commands' in profile:
+            for command in profile['common_commands']:
+               dbus.send_command(os.path.expandvars(os.path.expanduser(command)))
+               time.sleep(self.sleep_secs)
+         
+         # cd to directory.
+         dbus.send_command('cd {}'.format(os.path.expandvars(os.path.expanduser(tab['dir']))))
+         time.sleep(self.sleep_secs)
+         
+         # Add environment.
+         if 'environment' in tab:
+            for env_key, env_value in tab['environment'].iteritems():
+               expanded_value = os.path.expandvars(os.path.expanduser(env_value))
+               dbus.send_command(shell_attributes.env_command_template.format(env_key, expanded_value))
+               time.sleep(self.sleep_secs)
+         
+         # Send tab-specific commands.
+         for command in tab['commands']:
+            dbus.send_command(os.path.expandvars(os.path.expanduser(command)))
+            time.sleep(self.sleep_secs)
+   
+   def _get_shell_attributes(self, shell):
+      # Use correct shell attributes.
+      if shell == 'bash':
+         return BashAttributes()
+      elif shell == 'csh':
+         return CshAttributes()
+      else:
+         raise KonsoleTabsError('Error: Invalid shell choice.')
+
+   def create_session(self, profile_name):
+      try:
+         profile = self._load_profile(profile_name)
+
+         # Save original history if necessary.
+         history_filepath = os.path.expanduser(profile['history'])
+         is_history = os.path.exists(history_filepath)
+         if is_history:
+            temp_dirpath = tempfile.mkdtemp()
+            shutil.move(history_filepath, temp_dirpath)
+         
+         try:
+            self._execute_commands(profile)
+         finally:
+            if is_history:
+               # Delete history if we created a fake one.
+               try:
+                  os.remove(history_filepath)
+               except OSError:
+                  pass
+            
+               # Load original history and cleanup.
+               history_temp_filepath = os.path.join(temp_dirpath, os.path.basename(history_filepath))
+               shutil.move(history_temp_filepath, os.path.dirname(history_filepath))
+               os.rmdir(temp_dirpath)
+      except KeyError as e:
+         raise KonsoleTabsError('Error: Profile is missing necessary information {}.'.format(e))
+
+
+def create_parser():
+   parser = argparse.ArgumentParser()
+   parser.add_argument('profile', metavar='profile', help='name of the profile to use')
+   parser.add_argument('-c', '--config-file', dest='config_file', help='use configuration specified in CONFIGFILE', metavar='CONFIGFILE')
+   return parser
+
+
+def main():
+   parser = create_parser()
+   options = parser.parse_args()
+
+   #logging.basicConfig(level=logging.DEBUG)
+
+   config_filepath = options.config_file if options.config_file else '~/.konsole_tabs'
+   konsole_tabs = KonsoleTabs(config_filepath)
+
+   try:
+      konsole_tabs.create_session(options.profile)
+   except KonsoleTabsError as e:
+      sys.exit(e)
+   except Exception as e:
+      logging.getLogger().debug(type(e))
+      sys.exit('Unknown error occurred: {}'.format(e))
+
+
+if __name__ == '__main__':
+   main()
+
