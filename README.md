@@ -8,7 +8,9 @@ It is currently supports only bash and csh. It is trivial to add support for mor
 
 KonsoleTabs uses a JSON-formatted configuration file to specify different profiles. A profile contains all the information pertaining to the tabs that should be opened. The default configuration file location is `~/.konsole_tabs`.
 
-Each profile is required to have a name, the shell type, a history file, and tabs. Common commands are optional. Within the tabs section, all fields are required except environment.
+Each profile is required to have a name, the shell type, a history file, and tabs. Common commands and output redirection are optional. Within the tabs section, all fields are required except environment.
+
+The ability to disable output redirection is offered due to problems I encountered with specific platforms.
 
 The common commands, tab dir, commands, and environment values will expand the user path and environment variables.
 
@@ -20,6 +22,7 @@ The common commands, tab dir, commands, and environment values will expand the u
    "profile": "sample",
    "shell": "bash",
    "history": "~/.bash_history",
+   "redirect_output": "false",
    "common_commands": ["echo 'hi'"],
    "tabs":
    [
@@ -54,6 +57,7 @@ There is no installation process, simply copy `konsoletabs` to a directory that 
 
 ### Requirements ###
 
+* Python 2.7
 * The `pidof` program
 * Recent enough Konsole version that uses D-Bus
 
