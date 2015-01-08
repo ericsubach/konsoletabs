@@ -124,7 +124,7 @@ class KonsoleTabs(object):
          self.config_filepath = os.path.expanduser(config_filepath)
 
       self.sleep_secs = 0.1
-      self.new_process_command_template = 'konsole --separate'
+      self.new_process_command = 'konsole'
       self.program_name = 'konsole'
       
    def _load_config_as_json(self):
