@@ -175,6 +175,9 @@ class KonsoleTabs(object):
             with open(os.devnull, 'w') as FNULL:
                process = subprocess.Popen(shlex.split(self.new_process_command), stdout=FNULL, stderr=subprocess.STDOUT)
                process.communicate()
+
+         if process.returncode != 0:
+            raise Exception()
       except Exception:
          raise KonsoleTabsError('Error: Error creating new Konsole process.')
 
