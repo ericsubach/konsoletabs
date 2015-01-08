@@ -168,9 +168,13 @@ class KonsoleTabs(object):
       # Create new process.
       logging.getLogger().info('Creating new Konsole process.')
       try:
-         FNULL = open(os.devnull, 'w')
-         process = subprocess.Popen(shlex.split(self.new_process_command_template), stdout=FNULL, stderr=subprocess.STDOUT)
-         process.communicate()
+         if 'redirect_output' in profile and profile['redirect_output'] == 'false':
+            process = subprocess.Popen(shlex.split(self.new_process_command))
+            process.communicate()
+         else:
+            with open(os.devnull, 'w') as FNULL:
+               process = subprocess.Popen(shlex.split(self.new_process_command), stdout=FNULL, stderr=subprocess.STDOUT)
+               process.communicate()
       except Exception:
          raise KonsoleTabsError('Error: Error creating new Konsole process.')
 
