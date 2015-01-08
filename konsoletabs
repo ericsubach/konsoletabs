@@ -50,7 +50,6 @@ class PidSetCalculator(object):
    def calculate(self):
       try:
          process = subprocess.Popen(['pidof', self.program_name], stdout=subprocess.PIPE)
-         process.wait()
          set_string = process.communicate()[0].strip()
          self.pids = sets.Set(set_string.split())
       except Exception:
